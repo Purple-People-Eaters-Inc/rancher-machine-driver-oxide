@@ -13,37 +13,22 @@ import (
 	"net"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/oxidecomputer/oxide.go/oxide"
 	"github.com/rancher/machine/libmachine/drivers"
-	"github.com/rancher/machine/libmachine/mcnflag"
+	"github.com/rancher/machine/libmachine/log"
 	"github.com/rancher/machine/libmachine/ssh"
 	"github.com/rancher/machine/libmachine/state"
 )
 
 const (
-	defaultSSHUser     = "oxide"
-	defaultSSHPort     = 22
-	defaultDescription = "Managed by the Oxide Rancher machine driver."
+	defaultSSHUser          = "oxide"
+	defaultSSHPort          = 22
+	defaultDescription      = "Managed by the Oxide Rancher machine driver."
+	errRequiredOptionNotSet = "required option not set: "
 )
-
-const (
-	flagHost                      = "oxide-host"
-	flagToken                     = "oxide-token"
-	flagProject                   = "oxide-project"
-	flagVCPUs                     = "oxide-vcpus"
-	flagMemory                    = "oxide-memory"
-	flagBootDiskSize              = "oxide-boot-disk-size"
-	flagBootDiskImageID           = "oxide-boot-disk-image-id"
-	flagVPC                       = "oxide-vpc"
-	flagSubnet                    = "oxide-subnet"
-	flagUserDataFile              = "oxide-user-data-file"
-	flagSSHUser                   = "oxide-ssh-user"
-	flagAdditionalSSHPublicKeyIDs = "oxide-additional-ssh-public-key-ids"
-)
-
-const errRequiredOptionNotSet = "required option not set: "
 
 // make sure Driver implements the drivers.Driver interface.
 var _ drivers.Driver = &Driver{}
@@ -77,6 +62,10 @@ type Driver struct {
 	// Image ID to use for the instance's boot disk.
 	BootDiskImageID string
 
+	// Size of hte instance's additional disk
+	AdditionalDiskSizesStrings []string
+	AdditionalDisks            []AdditionalDisk
+
 	// VPC for the instance.
 	VPC string
 
@@ -97,6 +86,9 @@ type Driver struct {
 	// `Remove`.
 	BootDiskID string
 
+	// IDs of the additional disks
+	AdditionalDiskIDs []string
+
 	// ID of the generated SSH public key that's injected into the instance.
 	// Used to delete the SSH public key during `Remove`.
 	SSHPublicKeyID string
@@ -114,16 +106,6 @@ func newDriver(machineName, storePath string) *Driver {
 			StorePath:   storePath,
 		},
 	}
-}
-
-// createOxideClient creates an Oxide client from the machine driver
-// configuration.
-func (d *Driver) createOxideClient() (*oxide.Client, error) {
-	return oxide.NewClient(&oxide.Config{
-		Host:      d.Host,
-		Token:     d.Token,
-		UserAgent: "Oxide Rancher Machine Driver/0.0.1 (Go; Linux) [Environment: Development]",
-	})
 }
 
 // Create creates the instance and any necessary dependencies (e.g., SSH keys,
@@ -175,6 +157,7 @@ func (d *Driver) Create() error {
 				Size: oxide.ByteCount(d.BootDiskSize),
 				Type: oxide.InstanceDiskAttachmentTypeCreate,
 			},
+			Disks:       []oxide.InstanceDiskAttachment{},
 			Description: defaultDescription,
 			Hostname:    oxide.Hostname(d.GetMachineName()),
 			Memory:      oxide.ByteCount(d.Memory),
@@ -195,6 +178,23 @@ func (d *Driver) Create() error {
 			UserData:      base64.StdEncoding.EncodeToString(userData),
 		},
 	}
+
+	for i, additionalDisk := range d.AdditionalDisks {
+		icp.Body.Disks = append(
+			icp.Body.Disks,
+			oxide.InstanceDiskAttachment{
+				Description: defaultDescription,
+				DiskSource: oxide.DiskSource{
+					BlockSize: oxide.BlockSize(512),
+					Type:      oxide.DiskSourceTypeBlank,
+				},
+				Name: additionalDisk.DiskName(d.GetMachineName(), i),
+				Size: oxide.ByteCount(additionalDisk.Size),
+				Type: oxide.InstanceDiskAttachmentTypeCreate,
+			},
+		)
+	}
+
 	instance, err := d.oxideClient.InstanceCreate(context.TODO(), icp)
 	if err != nil {
 		return err
@@ -202,6 +202,26 @@ func (d *Driver) Create() error {
 
 	d.InstanceID = instance.Id
 	d.BootDiskID = instance.BootDiskId
+
+	log.Infof("boot disk id %s", d.BootDiskID)
+
+	if len(d.AdditionalDiskSizesStrings) > 0 {
+		indlp := oxide.InstanceDiskListParams{
+			Instance: oxide.NameOrId(d.InstanceID),
+		}
+		disks, err := d.oxideClient.InstanceDiskListAllPages(context.TODO(), indlp)
+		if err != nil {
+			return err
+		}
+
+		d.AdditionalDiskIDs = make([]string, 0)
+		for _, disk := range disks {
+			log.Infof("disk attached to instance %s (%s)", disk.Name, disk.Id)
+			if !strings.EqualFold(d.BootDiskID, disk.Id) {
+				d.AdditionalDiskIDs = append(d.AdditionalDiskIDs, disk.Id)
+			}
+		}
+	}
 
 	inilp := oxide.InstanceNetworkInterfaceListParams{
 		Instance: oxide.NameOrId(d.InstanceID),
@@ -222,87 +242,6 @@ func (d *Driver) Create() error {
 // DriverName returns the name of this machine driver.
 func (d *Driver) DriverName() string {
 	return "oxide"
-}
-
-// GetCreateFlags configures the CLI flags for machine driver.
-func (d *Driver) GetCreateFlags() []mcnflag.Flag {
-	return []mcnflag.Flag{
-		mcnflag.StringFlag{
-			Name:   flagHost,
-			Usage:  "Oxide silo domain name (e.g., https://silo01.oxide.example.com). This is `OXIDE_HOST` when authenticating via the Oxide CLI.",
-			EnvVar: "OXIDE_HOST",
-		},
-		mcnflag.StringFlag{
-			Name:   flagToken,
-			Usage:  "Oxide API token. This is `OXIDE_TOKEN` when authenticating via the Oxide CLI.",
-			EnvVar: "OXIDE_TOKEN",
-		},
-		mcnflag.StringFlag{
-			Name:   flagProject,
-			Usage:  "Oxide project to create instances within.",
-			EnvVar: "OXIDE_PROJECT",
-		},
-
-		// Instance hardware.
-		mcnflag.IntFlag{
-			Name:   flagVCPUs,
-			Usage:  "Number of vCPUs to give the instance.",
-			EnvVar: "OXIDE_VCPUS",
-			Value:  2,
-		},
-		mcnflag.IntFlag{
-			Name:   flagMemory,
-			Usage:  "Amount of memory, in bytes, to give the instance.",
-			EnvVar: "OXIDE_MEMORY",
-			Value:  4294967296, // 4 GiB
-		},
-
-		// Boot disk.
-		mcnflag.IntFlag{
-			Name:   flagBootDiskSize,
-			Usage:  "Size of the instance's boot disk, in bytes.",
-			EnvVar: "OXIDE_BOOT_DISK_SIZE",
-			Value:  21474836480, // 20 GiB
-		},
-		mcnflag.StringFlag{
-			Name:   flagBootDiskImageID,
-			Usage:  "Image ID to use for the instance's boot disk.",
-			EnvVar: "OXIDE_BOOT_DISK_IMAGE_ID",
-		},
-
-		// Networking.
-		mcnflag.StringFlag{
-			Name:   flagVPC,
-			Usage:  "VPC for the instance.",
-			EnvVar: "OXIDE_VPC",
-			Value:  "default",
-		},
-		mcnflag.StringFlag{
-			Name:   flagSubnet,
-			Usage:  "Subnet for the instance.",
-			EnvVar: "OXIDE_SUBNET",
-			Value:  "default",
-		},
-
-		// User data.
-		mcnflag.StringFlag{
-			Name:   flagUserDataFile,
-			Usage:  "Path to file containing user data.",
-			EnvVar: "OXIDE_USER_DATA_FILE",
-		},
-
-		// SSH information.
-		mcnflag.StringFlag{
-			Name:   flagSSHUser,
-			Usage:  "User to SSH into the instance",
-			EnvVar: "OXIDE_SSH_USER",
-		},
-		mcnflag.StringSliceFlag{
-			Name:   flagAdditionalSSHPublicKeyIDs,
-			Usage:  "Additional SSH public keys to inject into the instance.",
-			EnvVar: "OXIDE_ADDITIONAL_SSH_PUBLIC_KEY_IDS",
-		},
-	}
 }
 
 // GetSSHHostname returns the IP address or DNS name of the instance.
@@ -423,6 +362,15 @@ func (d *Driver) Remove() error {
 		return err
 	}
 
+	for _, diskID := range d.AdditionalDiskIDs {
+		log.Infof("diskID to delete: (%s)", diskID)
+		if err := d.oxideClient.DiskDelete(context.TODO(), oxide.DiskDeleteParams{
+			Disk: oxide.NameOrId(diskID),
+		}); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -441,48 +389,6 @@ func (d *Driver) Restart() error {
 	}
 	if _, err := d.oxideClient.InstanceReboot(context.TODO(), irp); err != nil {
 		return err
-	}
-
-	return nil
-}
-
-// SetConfigFromFlags reads the CLI flags and sets necessary state on the
-// driver for use by other methods.
-func (d *Driver) SetConfigFromFlags(opts drivers.DriverOptions) error {
-	d.Host = opts.String(flagHost)
-	d.Token = opts.String(flagToken)
-	d.Project = opts.String(flagProject)
-	d.VCPUS = opts.Int(flagVCPUs)
-	d.Memory = opts.Int(flagMemory)
-	d.BootDiskSize = opts.Int(flagBootDiskSize)
-	d.BootDiskImageID = opts.String(flagBootDiskImageID)
-	d.VPC = opts.String(flagVPC)
-	d.Subnet = opts.String(flagSubnet)
-	d.UserDataFile = opts.String(flagUserDataFile)
-	d.SSHUser = opts.String(flagSSHUser)
-	d.AdditionalSSHPublicKeyIDs = opts.StringSlice(flagAdditionalSSHPublicKeyIDs)
-	d.SSHPort = defaultSSHPort
-
-	var errRequiredFlag error
-
-	if d.Host == "" {
-		errRequiredFlag = errors.Join(errRequiredFlag, errors.New(errRequiredOptionNotSet+flagHost))
-	}
-
-	if d.Token == "" {
-		errRequiredFlag = errors.Join(errRequiredFlag, errors.New(errRequiredOptionNotSet+flagToken))
-	}
-
-	if d.Project == "" {
-		errRequiredFlag = errors.Join(errRequiredFlag, errors.New(errRequiredOptionNotSet+flagProject))
-	}
-
-	if d.BootDiskImageID == "" {
-		errRequiredFlag = errors.Join(errRequiredFlag, errors.New(errRequiredOptionNotSet+flagBootDiskImageID))
-	}
-
-	if errRequiredFlag != nil {
-		return errRequiredFlag
 	}
 
 	return nil

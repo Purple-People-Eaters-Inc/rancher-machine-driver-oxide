@@ -124,7 +124,7 @@ type Driver struct {
 	// additional disks during `Remove`.
 	AdditionalDiskIDs []string
 
-	oxideClient *oxide.Client
+	oxideClient oxideClient
 }
 
 // newDriver creates a new Oxide rancher machine driver.
@@ -139,28 +139,12 @@ func newDriver(machineName, storePath string) *Driver {
 	}
 }
 
-// createOxideClient creates an Oxide client from the machine driver
-// configuration.
-func (d *Driver) createOxideClient() (*oxide.Client, error) {
-	return oxide.NewClient(&oxide.Config{
-		Host:      d.Host,
-		Token:     d.Token,
-		UserAgent: "Oxide Rancher Machine Driver/0.0.1 (Go; Linux) [Environment: Development]",
-	})
-}
-
 // Create creates the instance and any necessary dependencies (e.g., SSH keys,
 // disks) and updates the machine driver with state for use by other methods.
 // Create must start the instance otherwise the machine driver will time out
 // waiting for the instance to start.
 func (d *Driver) Create() error {
-	if d.oxideClient == nil {
-		client, err := d.createOxideClient()
-		if err != nil {
-			return err
-		}
-		d.oxideClient = client
-	}
+	d.assertClient()
 
 	pubKey, err := d.createSSHKeyPair()
 	if err != nil {
@@ -467,14 +451,7 @@ func (d *Driver) PreCreateCheck() error {
 // Remove stops and removes the instance and any dependencies so that
 // they no longer exist in Oxide.
 func (d *Driver) Remove() error {
-	if d.oxideClient == nil {
-		client, err := d.createOxideClient()
-		if err != nil {
-			return err
-		}
-		d.oxideClient = client
-	}
-
+	d.assertClient()
 	if err := d.Stop(); err != nil {
 		return err
 	}
@@ -531,14 +508,7 @@ func (d *Driver) Remove() error {
 
 // Restart restarts the instance without changing its configuration.
 func (d *Driver) Restart() error {
-	if d.oxideClient == nil {
-		client, err := d.createOxideClient()
-		if err != nil {
-			return err
-		}
-		d.oxideClient = client
-	}
-
+	d.assertClient()
 	irp := oxide.InstanceRebootParams{
 		Instance: oxide.NameOrId(d.InstanceID),
 	}
@@ -636,14 +606,7 @@ func (d *Driver) SetConfigFromFlags(opts drivers.DriverOptions) error {
 
 // Start starts the instance.
 func (d *Driver) Start() error {
-	if d.oxideClient == nil {
-		client, err := d.createOxideClient()
-		if err != nil {
-			return err
-		}
-		d.oxideClient = client
-	}
-
+	d.assertClient()
 	isp := oxide.InstanceStartParams{
 		Instance: oxide.NameOrId(d.InstanceID),
 	}
@@ -656,14 +619,7 @@ func (d *Driver) Start() error {
 
 // Stop stops the instance.
 func (d *Driver) Stop() error {
-	if d.oxideClient == nil {
-		client, err := d.createOxideClient()
-		if err != nil {
-			return err
-		}
-		d.oxideClient = client
-	}
-
+	d.assertClient()
 	isp := oxide.InstanceStopParams{
 		Instance: oxide.NameOrId(d.InstanceID),
 	}

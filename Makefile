@@ -15,8 +15,12 @@ $(BINDIR)/$(BINARY): $(BINDIR) clean
 $(BINDIR):
 	mkdir -p $@
 
+.PHONY: generate
+generate:
+	$(GO) generate ./...
+
 .PHONY: test
-test:
+test: generate
 	$(GO) test -cover -v ./...
 
 .PHONY: clean

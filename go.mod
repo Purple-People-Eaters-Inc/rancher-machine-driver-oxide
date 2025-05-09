@@ -13,6 +13,7 @@ require (
 	github.com/onsi/gomega v1.36.1
 	github.com/oxidecomputer/oxide.go v0.4.0
 	github.com/rancher/machine v0.15.0-rancher122
+	go.uber.org/mock v0.5.2
 )
 
 require (

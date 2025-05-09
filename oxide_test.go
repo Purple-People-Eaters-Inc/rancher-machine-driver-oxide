@@ -6,24 +6,34 @@
 package main
 
 import (
+	"fmt"
+
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	"github.com/oxidecomputer/oxide.go/oxide"
+	"github.com/oxidecomputer/rancher-machine-driver-oxide/mock"
 	"github.com/rancher/machine/commands/commandstest"
 	"github.com/rancher/machine/libmachine/state"
+	"go.uber.org/mock/gomock"
 )
+
+//go:generate mockgen -destination mock/oxide_client.go -package mock . oxideClient
+//go:generate mockgen -destination mock/driver_options.go -package mock github.com/rancher/machine/libmachine/drivers DriverOptions
 
 var _ = Describe("Driver", func() {
 	var SUT *Driver
-	var opts *commandstest.FakeFlagger
+	var ctrl *gomock.Controller
+	var opts *mock.MockDriverOptions
 
 	BeforeEach(func() {
 		SUT = newDriver("bob", "path")
-		opts = defaultMockDriverOptions()
+		ctrl = gomock.NewController(GinkgoT())
+		opts = mock.NewMockDriverOptions(ctrl)
 	})
 
 	Describe("SetConfigFromFlags", func() {
 		It("should succeed when all required fields are given", func() {
+			defaultDriverOptions(opts)
 			Expect(SUT.SetConfigFromFlags(opts)).To(Succeed())
 		})
 
@@ -31,8 +41,9 @@ var _ = Describe("Driver", func() {
 			DescribeTable("should fail when a required string field is missing",
 				func(fields []string) {
 					for _, field := range fields {
-						opts.Data[field] = ""
+						opts.EXPECT().String(gomock.Eq(field)).Return("").AnyTimes()
 					}
+					defaultDriverOptions(opts)
 					err := SUT.SetConfigFromFlags(opts)
 					Expect(err).To(HaveOccurred())
 				},
@@ -98,17 +109,49 @@ var _ = Describe("Driver", func() {
 			Entry("errors with invalid size unit suffix", "20 ABC,"),
 		)
 	})
+
+	Describe("Workflow", func() {
+		var mockClient *mock.MockoxideClient
+		BeforeEach(func() {
+			mockClient = mock.NewMockoxideClient(ctrl)
+			SUT.oxideClient = mockClient
+		})
+
+		Describe("Start", func() {
+			It("starts successfully", func() {
+				mockClient.EXPECT().InstanceStart(gomock.Any(), gomock.Any()).Return(nil, nil)
+				Expect(SUT.Start()).To(Succeed())
+			})
+
+			It("fails when the machine is not running", func() {
+				mockClient.EXPECT().InstanceStart(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("fake error"))
+				err := SUT.Start()
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
+		Describe("Stop", func() {
+			It("starts successfully", func() {
+				mockClient.EXPECT().InstanceStop(gomock.Any(), gomock.Any()).Return(nil, nil)
+				Expect(SUT.Stop()).To(Succeed())
+			})
+
+			It("fails when the machine is not running", func() {
+				mockClient.EXPECT().InstanceStop(gomock.Any(), gomock.Any()).Return(nil, fmt.Errorf("fake error"))
+				err := SUT.Stop()
+				Expect(err).To(HaveOccurred())
+			})
+		})
+	})
 })
 
-func defaultMockDriverOptions() (rv *commandstest.FakeFlagger) {
-	rv = &commandstest.FakeFlagger{
-		Data: map[string]any{},
-	}
-
-	rv.Data[flagHost] = "host"
-	rv.Data[flagToken] = "token"
-	rv.Data[flagProject] = "project"
-	rv.Data[flagBootDiskImageID] = "image"
-
-	return rv
+func defaultDriverOptions(m *mock.MockDriverOptions) {
+	m.EXPECT().String(gomock.Eq(flagHost)).Return("host").AnyTimes()
+	m.EXPECT().String(gomock.Eq(flagToken)).Return("token").AnyTimes()
+	m.EXPECT().String(gomock.Eq(flagProject)).Return("project").AnyTimes()
+	m.EXPECT().String(gomock.Eq(flagBootDiskImageID)).Return("image").AnyTimes()
+	m.EXPECT().String(gomock.Any()).Return("").AnyTimes()
+	m.EXPECT().StringSlice(gomock.Any()).Return(nil).AnyTimes()
+	m.EXPECT().Int(gomock.Any()).Return(0).AnyTimes()
+	m.EXPECT().Bool(gomock.Any()).Return(false).AnyTimes()
 }
